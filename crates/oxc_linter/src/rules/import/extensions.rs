@@ -553,12 +553,11 @@ impl Rule for Extensions {
             return;
         }
         for argument in &call_expr.arguments {
-            if let Argument::StringLiteral(s) = argument
-                && let Some(source) = s.value.as_str()
-            {
+            if let Argument::StringLiteral(s) = argument {
+                // Configured patterns see a lone surrogate as U+FFFD.
                 self.process_import(
                     ctx,
-                    source,
+                    &s.value.to_string_lossy(),
                     call_expr.span,
                     false, // require() is never a type import
                     true,  // treat require as import for diagnostics
@@ -878,6 +877,7 @@ fn test() {
     use serde_json::json;
 
     let pass = vec![
+        (r#"const foo = require("./foo\uD800.js");"#, Some(json!(["always"]))),
         // Default config: no extension requirements, unconfigured extensions are ignored
         (r#"import a from "@/a""#, None),
         (r#"import a from "a""#, None),
@@ -1489,6 +1489,8 @@ fn test() {
             "#,
             Some(json!(["always"])),
         ),
+        // A lone surrogate does not hide a `require()` specifier.
+        (r#"const foo = require("./foo\uD800");"#, Some(json!(["always"]))),
         (
             r#"
                 const { foo } = require("./foo.js");

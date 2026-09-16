@@ -48,10 +48,6 @@ fn test() {
         (r"test('foo \uD800 bar', () => {});", None),
         (r"test('\uD800test foo', () => {});", None),
         (
-            r"test('\uD800 correct', () => {});",
-            Some(serde_json::json!([{ "disallowedWords": ["correct"] }])),
-        ),
-        (
             "it('correctly sets the value', () => {});",
             Some(serde_json::json!([
               { "ignoreTypeOfDescribeName": false, "disallowedWords": ["correct"] },
@@ -247,6 +243,12 @@ fn test() {
     ];
 
     let fail = vec![
+        // Configured patterns see a lone surrogate as U+FFFD.
+        (
+            r"test('\uD800 correct', () => {});",
+            Some(serde_json::json!([{ "disallowedWords": ["correct"] }])),
+        ),
+        (r"test('\uD800 foo', () => {});", Some(serde_json::json!([{ "mustMatch": "^bar" }]))),
         ("const String = { raw: () => 'foo' }; it(String.raw`foo`, () => {})", None),
         (
             "test('the correct way to properly handle all things', () => {});",

@@ -789,3 +789,13 @@ fn rfind_calls_the_predicate_from_the_end() {
     let mut first = true;
     assert_eq!("ab".rfind(|_: char| std::mem::take(&mut first)), Some(1));
 }
+
+#[test]
+fn to_string_lossy_replaces_lone_surrogates() {
+    use std::borrow::Cow;
+
+    let allocator = Allocator::new();
+    assert!(matches!(JSStr::from("a😀").to_string_lossy(), Cow::Borrowed("a😀")));
+    let value = from_utf16_in(&[0x61, 0xD800, 0xD83D, 0xDE00, 0xDC00], &allocator);
+    assert_eq!(value.to_string_lossy(), "a\u{FFFD}😀\u{FFFD}");
+}

@@ -19,7 +19,7 @@ use oxc_ast::{
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
-use oxc_str::CompactStr;
+use oxc_str::{CompactStr, format_compact_str};
 
 use crate::{
     ModuleRecord,
@@ -794,10 +794,8 @@ impl RestrictedPath {
             return ImportNameResult::Allowed;
         }
 
-        let Some(name) = literal.value.as_str() else {
-            return ImportNameResult::Allowed;
-        };
-        let name = CompactStr::from(name);
+        // Diagnostics escape a lone surrogate.
+        let name = format_compact_str!("{}", literal.value.display());
         let unused_name = &CompactStr::from("__<>import_name_that_cant_be_used<>__");
 
         match self.is_name_span_allowed(unused_name) {
@@ -901,10 +899,8 @@ impl RestrictedPattern {
             return ImportNameResult::Allowed;
         }
 
-        let Some(name) = literal.value.as_str() else {
-            return ImportNameResult::Allowed;
-        };
-        let name = CompactStr::from(name);
+        // Diagnostics escape a lone surrogate.
+        let name = format_compact_str!("{}", literal.value.display());
         let unused_name = &CompactStr::from("__<>import_name_that_cant_be_used<>__");
 
         match self.is_name_span_allowed(unused_name) {
@@ -1294,12 +1290,17 @@ impl NoRestrictedImports {
         is_type: bool,
         is_dynamic_import: bool,
     ) {
-        let Some(source) = source_literal.value.as_str() else {
-            return;
+        // Configured patterns see a lone surrogate as U+FFFD; diagnostics escape it.
+        let lossy = source_literal.value.to_string_lossy();
+        let shown = match source_literal.value.as_str() {
+            Some(source) => Cow::Borrowed(source),
+            None => Cow::Owned(source_literal.value.display().to_string()),
         };
+        let (source, shown) = (lossy.as_ref(), shown.as_ref());
 
         for path in &self.paths {
-            if source != path.name.as_str() {
+            // A configured name never contains a lone surrogate, so only a UTF-8 source matches.
+            if source_literal.value != path.name.as_str() {
                 continue;
             }
 
@@ -1317,8 +1318,7 @@ impl NoRestrictedImports {
                 continue;
             }
 
-            let diagnostic =
-                get_diagnostic_from_import_name_result_path(span, source, result, path);
+            let diagnostic = get_diagnostic_from_import_name_result_path(span, shown, result, path);
 
             ctx.diagnostic(diagnostic);
         }
@@ -1349,7 +1349,7 @@ impl NoRestrictedImports {
                 }
                 GlobResult::Found => {
                     let diagnostic: OxcDiagnostic = get_diagnostic_from_import_name_result_pattern(
-                        span, source, result, pattern,
+                        span, shown, result, pattern,
                     );
 
                     found_errors.push(diagnostic);
@@ -1359,7 +1359,7 @@ impl NoRestrictedImports {
 
             if pattern.get_regex_result(source) {
                 ctx.diagnostic(get_diagnostic_from_import_name_result_pattern(
-                    span, source, result, pattern,
+                    span, shown, result, pattern,
                 ));
             }
         }
@@ -2033,6 +2033,8 @@ fn test() {
         ),
         // dynamic `import()` with a string-literal source
         ("import('os');", Some(serde_json::json!(["fs"]))),
+        // A configured name never matches a lone surrogate, even as U+FFFD.
+        (r"import('a\uD800');", Some(serde_json::json!(["a\u{FFFD}"]))),
         ("import('foo/bar');", Some(serde_json::json!([{ "patterns": ["foo/baz"] }]))),
         // non-literal dynamic import sources are ignored
         ("import(foo);", Some(serde_json::json!(["foo"]))),
@@ -3637,6 +3639,9 @@ fn test() {
                 serde_json::json!([{ "patterns": [{ "regex": "^foo$", "allowImportNames": ["allowed"] }] }]),
             ),
         ),
+        // Patterns see a lone surrogate as U+FFFD.
+        (r"import('a\uD800');", Some(serde_json::json!([{ "patterns": [{ "regex": "^a.$" }] }]))),
+        (r"import('a\uD800/b');", Some(serde_json::json!([{ "patterns": [{ "group": ["a*/b"] }] }]))),
     ]);
 
     Tester::new(NoRestrictedImports::NAME, NoRestrictedImports::PLUGIN, pass, fail)

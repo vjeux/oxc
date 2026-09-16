@@ -148,18 +148,23 @@ impl Rule for NoRequireImports {
                     && let Some(argument) = call_expr.arguments.first()
                 {
                     match argument {
-                        Argument::TemplateLiteral(template_literal) => {
-                            let Some(quasi) = template_literal.quasis.first() else {
-                                return;
-                            };
-                            if match_argument_value_with_regex(&self.allow, &quasi.value.raw) {
-                                return;
-                            }
+                        // Like typescript-eslint's `getStaticStringValue`, only a template
+                        // without expressions has a value, and it is the cooked one.
+                        Argument::TemplateLiteral(template_literal)
+                            if template_literal.single_quasi().is_some_and(|value| {
+                                match_argument_value_with_regex(
+                                    &self.allow,
+                                    &value.to_string_lossy(),
+                                )
+                            }) =>
+                        {
+                            return;
                         }
                         Argument::StringLiteral(string_literal)
-                            if string_literal.value.as_str().is_some_and(|value| {
-                                match_argument_value_with_regex(&self.allow, value)
-                            }) =>
+                            if match_argument_value_with_regex(
+                                &self.allow,
+                                &string_literal.value.to_string_lossy(),
+                            ) =>
                         {
                             return;
                         }
@@ -176,9 +181,10 @@ impl Rule for NoRequireImports {
                     }
 
                     if !self.allow.is_empty()
-                        && mod_ref.expression.value.as_str().is_some_and(|value| {
-                            match_argument_value_with_regex(&self.allow, value)
-                        })
+                        && match_argument_value_with_regex(
+                            &self.allow,
+                            &mod_ref.expression.value.to_string_lossy(),
+                        )
                     {
                         return;
                     }
@@ -198,6 +204,19 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
+        // A pattern sees a lone surrogate as U+FFFD.
+        (
+            r"const pkg = require('a\uD800b.json');",
+            Some(serde_json::json!([{ "allow": ["\\.json$"] }])),
+        ),
+        (
+            r"import pkg = require('a\uD800b.json');",
+            Some(serde_json::json!([{ "allow": ["\\.json$"] }])),
+        ),
+        (
+            r"const pkg = require(`a\uD800b.json`);",
+            Some(serde_json::json!([{ "allow": ["^a.b\\.json$"] }])),
+        ),
         ("import { l } from 'lib';", None),
         ("var lib3 = load('not_an_import');", None),
         ("var lib4 = lib2.subImport;", None),
@@ -320,6 +339,23 @@ fn test() {
     ];
 
     let fail = vec![
+        (
+            r"const pkg = require('a\uD800b.json');",
+            Some(serde_json::json!([{ "allow": ["^foo"] }])),
+        ),
+        (
+            r"import pkg = require('a\uD800b.json');",
+            Some(serde_json::json!([{ "allow": ["^foo"] }])),
+        ),
+        (
+            r"const pkg = require(`a\uD800b.json`);",
+            Some(serde_json::json!([{ "allow": ["^foo"] }])),
+        ),
+        // A template with expressions has no static value.
+        (
+            "const pkg = require(`./${name}.json`);",
+            Some(serde_json::json!([{ "allow": ["^\\./"] }])),
+        ),
         ("var lib = require('lib');", None),
         ("let lib2 = require('lib2');", None),
         (

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fmt::{self, Debug, Display, Write},
     hash::{Hash, Hasher},
     iter::FusedIterator,
@@ -179,6 +180,22 @@ impl<'a> JSStr<'a> {
             // is valid UTF-8
             Some(unsafe { str::from_utf8_unchecked(self.as_bytes()) })
         }
+    }
+
+    /// Convert the value to UTF-8, replacing each lone surrogate with U+FFFD REPLACEMENT CHARACTER,
+    /// like [`String::from_utf16_lossy`].
+    ///
+    /// Borrows the value when it contains no lone surrogate. Use this where the result is only
+    /// matched against UTF-8 text, such as a configured pattern, and never written back as a value.
+    #[inline]
+    pub fn to_string_lossy(self) -> Cow<'a, str> {
+        if let Some(value) = self.as_str() {
+            return Cow::Borrowed(value);
+        }
+        // A lone surrogate and U+FFFD both take 3 bytes, so the length is unchanged.
+        let mut value = String::with_capacity(self.len());
+        value.extend(self.chars().map(|c| c.to_char().unwrap_or(char::REPLACEMENT_CHARACTER)));
+        Cow::Owned(value)
     }
 
     /// Return the byte length of the WTF-8 representation.

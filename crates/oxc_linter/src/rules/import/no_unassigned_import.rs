@@ -8,7 +8,7 @@ use oxc_ast::{
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
-use oxc_str::CompactStr;
+use oxc_str::{CompactStr, JSStr};
 use serde::Deserialize;
 
 use crate::{
@@ -97,12 +97,7 @@ impl Rule for NoUnassignedImport {
                 if import_decl.specifiers.is_some() {
                     return;
                 }
-                if import_decl
-                    .source
-                    .value
-                    .as_str()
-                    .is_none_or(|source| !self.is_match_allow_globs(source))
-                {
+                if !self.is_match_allow_globs(import_decl.source.value) {
                     ctx.diagnostic(no_unassigned_import_diagnostic(
                         import_decl.span,
                         "Imported module should be assigned",
@@ -120,8 +115,7 @@ impl Rule for NoUnassignedImport {
                 let Argument::StringLiteral(source_str) = first_arg else {
                     return;
                 };
-                if source_str.value.as_str().is_none_or(|source| !self.is_match_allow_globs(source))
-                {
+                if !self.is_match_allow_globs(source_str.value) {
                     ctx.diagnostic(no_unassigned_import_diagnostic(
                         call_expr.span,
                         "A `require()` style import is forbidden.",
@@ -134,8 +128,9 @@ impl Rule for NoUnassignedImport {
 }
 
 impl NoUnassignedImportConfig {
-    fn is_match_allow_globs(&self, source: &str) -> bool {
-        self.globs.iter().any(|glob| fast_glob::glob_match(glob.as_str(), source))
+    fn is_match_allow_globs(&self, source: JSStr<'_>) -> bool {
+        let source = source.to_string_lossy();
+        self.globs.iter().any(|glob| fast_glob::glob_match(glob.as_str(), source.as_ref()))
     }
 }
 
@@ -145,6 +140,9 @@ fn test() {
     use serde_json::json;
 
     let pass = vec![
+        // A glob sees a lone surrogate as U+FFFD.
+        (r"import './\uD800.css'", Some(json!([{ "allow": ["**"] }]))),
+        (r"require('./\uD800.css')", Some(json!([{ "allow": ["**/*.css"] }]))),
         ("import _ from 'foo'", None),
         ("import foo from 'foo'", None),
         ("import foo, { bar } from 'foo'", None),
@@ -168,6 +166,12 @@ fn test() {
     ];
 
     let fail = vec![
+        (r"import './\uD800.css'", None),
+        (r"require('./\uD800.css')", None),
+        (r"import './\uD800.css'", Some(json!([{ "allow": [] }]))),
+        (r"require('./\uD800.css')", Some(json!([{ "allow": [] }]))),
+        (r"import './\uD800.css'", Some(json!([{ "allow": ["**/*.js"] }]))),
+        (r"require('./\uD800.css')", Some(json!([{ "allow": ["**/*.js"] }]))),
         ("require('should')", None),
         ("import 'foo'", None),
         ("import './styles/app.css'", Some(json!([{ "allow": ["styles/*.css"]}]))),

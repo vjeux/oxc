@@ -248,6 +248,13 @@ source: crates/oxc_linter/src/tester.rs
    ╰────
   help: Add a file extension to this import.
 
+  ⚠ import(extensions): Missing file extension in import declaration.
+   ╭─[extensions.tsx:1:13]
+ 1 │ const foo = require("./foo\uD800");
+   ·             ──────────────────────
+   ╰────
+  help: Add a file extension to this import.
+
   ⚠ import(extensions): File extension "js" should not be included in the import declaration.
    ╭─[extensions.tsx:2:33]
  1 │ 

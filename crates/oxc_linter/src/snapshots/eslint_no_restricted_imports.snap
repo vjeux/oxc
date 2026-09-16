@@ -1037,3 +1037,15 @@ source: crates/oxc_linter/src/tester.rs
  1 │ import 'foo'; import { allowed } from 'foo'; import {} from 'foo';
    · ─────────────
    ╰────
+
+  ⚠ eslint(no-restricted-imports): 'a\ud800' import is restricted from being used by a pattern.
+   ╭─[no_restricted_imports.tsx:1:1]
+ 1 │ import('a\uD800');
+   · ─────────────────
+   ╰────
+
+  ⚠ eslint(no-restricted-imports): 'a\ud800/b' import is restricted from being used by a pattern.
+   ╭─[no_restricted_imports.tsx:1:1]
+ 1 │ import('a\uD800/b');
+   · ───────────────────
+   ╰────

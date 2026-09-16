@@ -103,17 +103,18 @@ impl Rule for RelativeUrlStyle {
 
         match first_arg {
             Argument::StringLiteral(str_lit) => {
-                let Some(url) = str_lit.value.as_str() else {
-                    return;
-                };
-
                 match self.0 {
                     RelativeUrlStyleConfig::Never => {
-                        let raw = str_lit.raw.as_ref().map_or(url, |r| {
+                        let raw = if let Some(r) = &str_lit.raw {
                             let s = r.as_str();
                             // remove surrounding quotes
                             &s[1..s.len() - 1]
-                        });
+                        } else {
+                            let Some(url) = str_lit.value.as_str() else {
+                                return;
+                            };
+                            url
+                        };
 
                         if can_remove_dot_slash(raw, new_expr) {
                             ctx.diagnostic_with_fix(never_diagnostic(str_lit.span), |fixer| {
@@ -126,7 +127,9 @@ impl Rule for RelativeUrlStyle {
                         }
                     }
                     RelativeUrlStyleConfig::Always => {
-                        if can_add_dot_slash(url, new_expr) {
+                        // `URL` takes a USVString, which replaces lone surrogates with U+FFFD.
+                        // The fix only inserts `./` into the source text.
+                        if can_add_dot_slash(&str_lit.value.to_string_lossy(), new_expr) {
                             ctx.diagnostic_with_fix(always_diagnostic(str_lit.span), |fixer| {
                                 let insert_pos = str_lit.span.start + 1;
                                 let insert_span = Span::new(insert_pos, insert_pos);
@@ -166,13 +169,10 @@ fn can_add_dot_slash(url: &str, new_expr: &NewExpression) -> bool {
         return false;
     }
 
-    if let Some(Argument::StringLiteral(base_lit)) = new_expr.arguments.get(1) {
-        let Some(base) = base_lit.value.as_str() else {
-            return false;
-        };
-        if is_safe_to_add_dot_slash(url, &[base]) {
-            return true;
-        }
+    if let Some(Argument::StringLiteral(base_lit)) = new_expr.arguments.get(1)
+        && is_safe_to_add_dot_slash(url, &[&base_lit.value.to_string_lossy()])
+    {
+        return true;
     }
 
     is_safe_to_add_dot_slash(url, &TEST_URL_BASES)
@@ -183,13 +183,10 @@ fn can_remove_dot_slash(url: &str, new_expr: &NewExpression) -> bool {
         return false;
     }
 
-    if let Some(Argument::StringLiteral(base_lit)) = new_expr.arguments.get(1) {
-        let Some(base) = base_lit.value.as_str() else {
-            return false;
-        };
-        if is_safe_to_remove_dot_slash(url, &[base]) {
-            return true;
-        }
+    if let Some(Argument::StringLiteral(base_lit)) = new_expr.arguments.get(1)
+        && is_safe_to_remove_dot_slash(url, &[&base_lit.value.to_string_lossy()])
+    {
+        return true;
     }
 
     is_safe_to_remove_dot_slash(url, &TEST_URL_BASES)
@@ -301,6 +298,11 @@ fn test() {
         (r#"new URL("foo", base)"#, Some(serde_json::json!(["always"]))),
         (r"new URL('foo', base)", Some(serde_json::json!(["always"]))),
         (r#"new URL("", "https://example.com/a/b/")"#, Some(serde_json::json!(["always"]))),
+        (r#"new URL("./a\uD800", "https://x.com/")"#, None),
+        (r#"new URL("a\uD800", "https://x.com/")"#, Some(serde_json::json!(["always"]))),
+        // The base is a USVString too.
+        (r#"new URL("./foo", "https://x.com/\uD800/")"#, None),
+        (r#"new URL("foo", "https://x.com/\uD800/")"#, Some(serde_json::json!(["always"]))),
     ];
 
     let fix = vec![
@@ -322,6 +324,26 @@ fn test() {
         (
             r#"new URL("", "https://example.com/a/b/")"#,
             r#"new URL("./", "https://example.com/a/b/")"#,
+            Some(serde_json::json!(["always"])),
+        ),
+        (
+            r#"new URL("./a\uD800", "https://x.com/")"#,
+            r#"new URL("a\uD800", "https://x.com/")"#,
+            None,
+        ),
+        (
+            r#"new URL("a\uD800", "https://x.com/")"#,
+            r#"new URL("./a\uD800", "https://x.com/")"#,
+            Some(serde_json::json!(["always"])),
+        ),
+        (
+            r#"new URL("./foo", "https://x.com/\uD800/")"#,
+            r#"new URL("foo", "https://x.com/\uD800/")"#,
+            None,
+        ),
+        (
+            r#"new URL("foo", "https://x.com/\uD800/")"#,
+            r#"new URL("./foo", "https://x.com/\uD800/")"#,
             Some(serde_json::json!(["always"])),
         ),
     ];
