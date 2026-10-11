@@ -613,7 +613,7 @@ fn generate_struct(
 
     let mut getters = String::new();
     let mut to_json = String::new();
-    let mut extra_props = String::new();
+    let mut cache_fields = String::new();
     let mut walk_stmts = String::new();
 
     let mut has_type_field = false;
@@ -634,13 +634,12 @@ fn generate_struct(
                 let span_field_name = get_struct_field_name(span_field);
                 // `Span`'s `start` and `end` can be loaded as `i32`s
                 let value_construct_fn_name = i32_primitive_def.constructor_name(schema);
-                let pos = internal_pos_offset(field.offset_64() + span_field.offset_64());
+                let pos = this_pos_offset(field.offset_64() + span_field.offset_64());
 
                 #[rustfmt::skip]
                 write_it!(getters, "
                     get {span_field_name}() {{
-                        const internal = this.#internal;
-                        return {value_construct_fn_name}({pos}, internal.ast);
+                        return {value_construct_fn_name}({pos}, this.#ast);
                     }}
                 ");
 
@@ -661,33 +660,28 @@ fn generate_struct(
         } else {
             field_type.constructor_name(schema)
         };
-        let internal_pos = internal_pos_offset(field.offset_64());
+        let pos = this_pos_offset(field.offset_64());
 
-        // TODO: Currently we store all internal data in an object, stored as `#internal` property.
-        // This is on assumption that private field access is relatively slow, so we only want to
-        // incur a single private field fetch to get all the data.
-        // But maybe creating these extra objects is more costly, and we'd be better off having
-        // separate `#pos` and `#ast` private properties.
-        // Benchmark it and find out which is faster.
+        // Internal data is stored in private fields `#pos`, `#ast`, and `#$<field name>` for cached values.
+        // This is faster than storing it all in a single object in 1 private field, because that requires
+        // allocating an extra object for every node.
         if needs_cached_prop {
-            // Prefix property name with `$`, to avoid clashes with internal properties e.g. `pos`
-            write_it!(extra_props, ", ${field_name}: void 0");
+            // Prefix field name with `$`, to avoid clashes with `#pos` and `#ast`
+            write_it!(cache_fields, "#${field_name};\n");
 
             #[rustfmt::skip]
             write_it!(getters, "
                 get {field_name}() {{
-                    const internal = this.#internal,
-                        cached = internal.${field_name};
+                    const cached = this.#${field_name};
                     if (cached !== void 0) return cached;
-                    return internal.${field_name} = {value_fn}({internal_pos}, internal.ast);
+                    return this.#${field_name} = {value_fn}({pos}, this.#ast);
                 }}
             ");
         } else {
             #[rustfmt::skip]
             write_it!(getters, "
                 get {field_name}() {{
-                    const internal = this.#internal;
-                    return {value_fn}({internal_pos}, internal.ast);
+                    return {value_fn}({pos}, this.#ast);
                 }}
             ");
         }
@@ -726,7 +720,9 @@ fn generate_struct(
     write_it!(state.constructors, "
         export class {struct_name} {{
             {type_prop_init}
-            #internal;
+            #pos;
+            #ast;
+            {cache_fields}
 
             constructor(pos, ast) {{
                 if (ast?.token !== TOKEN) constructorError();
@@ -735,7 +731,8 @@ fn generate_struct(
                 const cached = nodes.get({pos_cache_key});
                 if (cached !== void 0) return cached;
 
-                this.#internal = {{ pos, ast {extra_props} }};
+                this.#pos = pos;
+                this.#ast = ast;
                 nodes.set({pos_cache_key}, this);
             }}
 
@@ -1168,17 +1165,17 @@ fn generate_vec(
     }
 }
 
-/// Generate internal pos offset string.
+/// Generate pos offset string for use in class getters.
 ///
-/// * If `offset == 0` -> `internal.pos`.
-/// * Otherwise -> `internal.pos + <offset>` (e.g. `internal.pos + 8`).
-fn internal_pos_offset<O>(offset: O) -> Cow<'static, str>
+/// * If `offset == 0` -> `this.#pos`.
+/// * Otherwise -> `this.#pos + <offset>` (e.g. `this.#pos + 8`).
+fn this_pos_offset<O>(offset: O) -> Cow<'static, str>
 where
     O: TryInto<u64>,
     <O as TryInto<u64>>::Error: Debug,
 {
     let offset = offset.try_into().unwrap();
-    if offset == 0 { Cow::Borrowed("internal.pos") } else { format_cow!("internal.pos + {offset}") }
+    if offset == 0 { Cow::Borrowed("this.#pos") } else { format_cow!("this.#pos + {offset}") }
 }
 
 /// Trait to get function names for constructor and walk functions for a type.
