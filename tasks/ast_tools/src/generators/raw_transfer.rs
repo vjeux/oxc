@@ -6,18 +6,20 @@ use cow_utils::CowUtils;
 use lazy_regex::{Captures, Lazy, Regex, lazy_regex, regex::Replacer};
 use proc_macro2::TokenStream;
 use quote::quote;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::{
     ast::{
-        Expression, LogicalOperator, ObjectExpression, ObjectPropertyKind, Program, PropertyKey,
-        PropertyKind,
+        ArrayExpression, ArrowFunctionExpression, BindingPattern, Expression, Function,
+        IdentifierReference, LogicalOperator, ObjectExpression, ObjectPropertyKind, Program,
+        PropertyKey, PropertyKind, Statement,
     },
     builder::AstBuilder,
 };
-use oxc_ast_visit::{VisitMut, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk_mut};
 use oxc_span::SPAN;
+use oxc_syntax::scope::ScopeFlags;
 
 use crate::{
     ALLOCATOR_CRATE_PATH, Generator, NAPI_PARSER_PACKAGE_PATH, OXLINT_APP_PATH,
@@ -345,6 +347,8 @@ fn generate_deserializers(
             flags: [bool; 6],
             allocator: &'a Allocator,
         ) {
+            TrivialFunctionInliner::inline(program, allocator);
+
             if flags[2] {
                 // `loc` enabled
                 LocFieldAdder::new(allocator).visit_program(program);
@@ -1770,6 +1774,159 @@ fn get_constants(schema: &Schema) -> Constants {
         comment_line_kind,
         raw_metadata_size,
         raw_metadata_align,
+    }
+}
+
+/// Visitor to inline calls to trivial functions, and remove those functions.
+///
+/// A function is trivial if it's a top-level function declaration with a single parameter,
+/// its body is a single `return` statement, the parameter is referenced exactly once in the return value,
+/// and the return value contains no object or array literals or functions
+/// (so inlining doesn't duplicate allocation sites).
+///
+/// e.g. given `function deserializeBoxFoo(pos) { return deserializeFoo(int32[pos >> 2]); }`,
+/// `deserializeBoxFoo(pos + 8)` becomes `deserializeFoo(int32[(pos + 8) >> 2])`.
+///
+/// V8 does not inline function calls until the calling function is optimized, so before that,
+/// calls to these tiny functions are a significant cost. Inlining them speeds up deserialization
+/// before the deserializer has been optimized (e.g. the first file that a process deserializes).
+/// It also reduces stack depth when deserializing deeply nested ASTs.
+///
+/// Works on AST pre-minification.
+struct TrivialFunctionInliner<'a> {
+    /// Trivial functions, keyed by function name. Values are parameter name and return value.
+    functions: FxHashMap<&'a str, (&'a str, Expression<'a>)>,
+    allocator: &'a Allocator,
+}
+
+impl<'a> TrivialFunctionInliner<'a> {
+    fn inline(program: &mut Program<'a>, allocator: &'a Allocator) {
+        let functions = program
+            .body
+            .iter()
+            .filter_map(|stmt| {
+                let Statement::FunctionDeclaration(func) = stmt else { return None };
+                let name = func.id.as_ref()?.name.as_str();
+                let [param] = func.params.items.as_slice() else { return None };
+                if func.params.rest.is_some() {
+                    return None;
+                }
+                let BindingPattern::BindingIdentifier(param) = &param.pattern else { return None };
+                let param = param.name.as_str();
+                let [Statement::ReturnStatement(ret)] = func.body.as_ref()?.statements.as_slice()
+                else {
+                    return None;
+                };
+                let value = ret.argument.as_ref()?;
+
+                let mut checker =
+                    TrivialFunctionChecker { param, param_count: 0, is_trivial: true };
+                checker.visit_expression(value);
+                (checker.is_trivial && checker.param_count == 1)
+                    .then(|| (name, (param, value.clone_in(allocator))))
+            })
+            .collect::<FxHashMap<_, _>>();
+
+        program.body.retain(|stmt| {
+            !matches!(stmt, Statement::FunctionDeclaration(func)
+                if func.id.as_ref().is_some_and(|id| functions.contains_key(id.name.as_str())))
+        });
+
+        let mut inliner = Self { functions, allocator };
+        inliner.visit_program(program);
+
+        // Check no references to removed functions remain (e.g. used as a value, not called)
+        let mut checker = RemovedFunctionChecker { functions: &inliner.functions };
+        checker.visit_program(program);
+    }
+}
+
+impl<'a> VisitMut<'a> for TrivialFunctionInliner<'a> {
+    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expr);
+
+        let Expression::CallExpression(call_expr) = expr else { return };
+        let Expression::Identifier(callee) = &call_expr.callee else { return };
+        let Some((param, value)) = self.functions.get(callee.name.as_str()) else { return };
+        let (param, mut value) = (*param, value.clone_in(self.allocator));
+
+        assert!(
+            call_expr.arguments.len() == 1 && call_expr.arguments[0].is_expression(),
+            "Trivial function `{}` must be called with a single argument",
+            callee.name
+        );
+        let arg = call_expr.arguments.pop().unwrap().into_expression();
+
+        ParamReplacer { param, arg: Some(arg) }.visit_expression(&mut value);
+        *expr = value;
+
+        // Inlined value may contain calls to other trivial functions
+        self.visit_expression(expr);
+    }
+}
+
+/// Visitor to check if a function's return value is suitable for inlining,
+/// and count references to the function's parameter.
+struct TrivialFunctionChecker<'p> {
+    param: &'p str,
+    param_count: usize,
+    is_trivial: bool,
+}
+
+impl<'a> Visit<'a> for TrivialFunctionChecker<'_> {
+    fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
+        if ident.name == self.param {
+            self.param_count += 1;
+        }
+    }
+
+    fn visit_object_expression(&mut self, _: &ObjectExpression<'a>) {
+        self.is_trivial = false;
+    }
+
+    fn visit_array_expression(&mut self, _: &ArrayExpression<'a>) {
+        self.is_trivial = false;
+    }
+
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {
+        self.is_trivial = false;
+    }
+
+    fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'a>) {
+        self.is_trivial = false;
+    }
+}
+
+/// Visitor to replace the parameter in an inlined function's return value with the call's argument.
+struct ParamReplacer<'a> {
+    param: &'a str,
+    arg: Option<Expression<'a>>,
+}
+
+impl<'a> VisitMut<'a> for ParamReplacer<'a> {
+    fn visit_expression(&mut self, expr: &mut Expression<'a>) {
+        if let Expression::Identifier(ident) = expr
+            && ident.name == self.param
+        {
+            *expr = self.arg.take().unwrap();
+        } else {
+            walk_mut::walk_expression(self, expr);
+        }
+    }
+}
+
+/// Visitor to check that no references to functions removed by [`TrivialFunctionInliner`] remain.
+struct RemovedFunctionChecker<'f, 'a> {
+    functions: &'f FxHashMap<&'a str, (&'a str, Expression<'a>)>,
+}
+
+impl<'a> Visit<'a> for RemovedFunctionChecker<'_, 'a> {
+    fn visit_identifier_reference(&mut self, ident: &IdentifierReference<'a>) {
+        assert!(
+            !self.functions.contains_key(ident.name.as_str()),
+            "Trivial function `{}` is referenced, but not called",
+            ident.name
+        );
     }
 }
 
