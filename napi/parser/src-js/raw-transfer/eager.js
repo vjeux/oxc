@@ -182,6 +182,7 @@ function deserializeTokens(buffer, sourceText, isJs) {
   let pos = int32[TOKENS_OFFSET_POS_32];
   const len = int32[TOKENS_LEN_POS_32];
 
+  // oxlint-disable-next-line unicorn/no-new-array -- allocates exact capacity, unlike `[]` + `push`
   const tokens = new Array(len);
   for (let i = 0; i < len; i++) {
     tokens[i] = deserializeToken(pos, int32, sourceText, isJs);
